@@ -1,0 +1,249 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collaborative Editor</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        #status {
+            color: #666;
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+        }
+        .connected {
+            color: #28a745;
+            background-color: #d4edda;
+        }
+        #editor {
+            width: 100%;
+            height: 500px;
+            border: 1px solid #ddd;
+            padding: 20px;
+            margin-top: 10px;
+            border-radius: 4px;
+            background-color: white;
+            font-size: 16px;
+            line-height: 1.6;
+            overflow-y: auto;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+        }
+        #editor:focus {
+            outline: none;
+            border-color: #80bdff;
+            box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+        }
+        .cursor {
+            position: absolute;
+            width: 2px;
+            height: 20px;
+            background-color: #007bff;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        #cursors {
+            position: relative;
+            pointer-events: none;
+        }
+        .user-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .user-count {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Collaborative Document Editor</h1>
+        <div class="user-info">
+            <div id="status">Connecting...</div>
+            <div class="user-count" id="userCount">0 users online</div>
+        </div>
+        <div id="editor" contenteditable="true" spellcheck="true"></div>
+        <div id="cursors"></div>
+    </div>
+    
+    <script>
+        const docId = window.location.pathname.split('/')[1] || 'default';
+        const editor = document.getElementById('editor');
+        const cursorsContainer = document.getElementById('cursors');
+        const statusDiv = document.getElementById('status');
+        const userCountDiv = document.getElementById('userCount');
+        let ws = null;
+        let connectedUsers = new Set();
+        
+        let lastSentContent = '';
+        let isRemoteUpdate = false;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        
+        function connectWebSocket() {
+            ws = new WebSocket('ws://localhost:9000');
+            
+            ws.onopen = () => {
+                console.log('Connected to server');
+                statusDiv.textContent = 'Connected';
+                statusDiv.className = 'connected';
+                reconnectAttempts = 0;
+                
+                // Join document
+                ws.send(JSON.stringify({
+                    type: 'join',
+                    docId: docId
+                }));
+            };
+            
+            ws.onclose = () => {
+                console.log('Disconnected from server');
+                statusDiv.textContent = 'Disconnected. Attempting to reconnect...';
+                statusDiv.className = 'error';
+                
+                // Try to reconnect
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    setTimeout(connectWebSocket, 2000);
+                } else {
+                    statusDiv.textContent = 'Could not connect to server. Please refresh the page to try again.';
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                statusDiv.textContent = 'Connection error. Please check if the server is running.';
+                statusDiv.className = 'error';
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    switch (data.type) {
+                        case 'init':
+                            editor.innerHTML = data.content || '';
+                            lastSentContent = data.content || '';
+                            break;
+                        case 'edit':
+                            isRemoteUpdate = true;
+                            editor.innerHTML = data.content;
+                            lastSentContent = data.content;
+                            isRemoteUpdate = false;
+                            break;
+                        case 'cursor':
+                            updateCursor(data.clientId, data.position);
+                            break;
+                        case 'user_joined':
+                            connectedUsers.add(data.clientId);
+                            updateUserCount();
+                            break;
+                        case 'user_left':
+                            connectedUsers.delete(data.clientId);
+                            updateUserCount();
+                            removeCursor(data.clientId);
+                            break;
+                    }
+                } catch (error) {
+                    console.error('Error handling message:', error);
+                }
+            };
+        }
+        
+        function updateUserCount() {
+            const count = connectedUsers.size;
+            userCountDiv.textContent = `${count} user${count !== 1 ? 's' : ''} online`;
+        }
+        
+        function removeCursor(clientId) {
+            const cursor = document.getElementById(`cursor-${clientId}`);
+            if (cursor) {
+                cursor.remove();
+            }
+        }
+        
+        // Send edits to server
+        editor.addEventListener('input', () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN || isRemoteUpdate) return;
+            
+            const content = editor.innerHTML;
+            if (content !== lastSentContent) {
+                ws.send(JSON.stringify({
+                    type: 'edit',
+                    docId: docId,
+                    content: content
+                }));
+                lastSentContent = content;
+            }
+        });
+        
+        // Send cursor position
+        editor.addEventListener('mousemove', (e) => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            const range = document.caretRangeFromPoint(e.clientX, e.clientY);
+            const offset = range ? getOffset(range.startContainer, range.startOffset) : 0;
+            
+            ws.send(JSON.stringify({
+                type: 'cursor',
+                docId: docId,
+                position: offset,
+                clientId: 'user-' + Math.random().toString(36).substr(2, 9)
+            }));
+        });
+        
+        function updateCursor(clientId, position) {
+            let cursor = document.getElementById(`cursor-${clientId}`);
+            if (!cursor) {
+                cursor = document.createElement('div');
+                cursor.id = `cursor-${clientId}`;
+                cursor.className = 'cursor';
+                cursorsContainer.appendChild(cursor);
+            }
+            
+            const editorRect = editor.getBoundingClientRect();
+            const lineHeight = 20; // Approximate line height
+            const charsPerLine = Math.floor(editor.clientWidth / 8); // Approximate characters per line
+            
+            cursor.style.left = `${(position % charsPerLine) * 8}px`;
+            cursor.style.top = `${Math.floor(position / charsPerLine) * lineHeight}px`;
+        }
+        
+        function getOffset(node, offset) {
+            return offset;
+        }
+        
+        // Start connection
+        connectWebSocket();
+    </script>
+</body>
+</html> 
